@@ -58,35 +58,78 @@ Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
 
     assert(!pos.checkers());
 
-    bool smallNet           = use_smallnet(pos);
-    auto [psqt, positional] = smallNet ? networks.small.evaluate(pos, accumulators, &caches.small)
-                                       : networks.big.evaluate(pos, accumulators, &caches.big);
-
-    Value nnue = (125 * psqt + 131 * positional) / 128;
-
-    // Re-evaluate the position when higher eval accuracy is worth the time spent
-    if (smallNet && (std::abs(nnue) < 236))
-    {
-        std::tie(psqt, positional) = networks.big.evaluate(pos, accumulators, &caches.big);
-        nnue                       = (125 * psqt + 131 * positional) / 128;
-        smallNet                   = false;
+    // Placeholder for UCI option check
+    bool useAugmented = false; 
+    if (networks.augmented.has_value() /* && UCI::InfoUCI::UseAugmentedNNUE */ ) { // Second part is pseudo-code
+        useAugmented = true;
     }
 
-    // Blend optimism and eval with nnue complexity
-    int nnueComplexity = std::abs(psqt - positional);
-    optimism += optimism * nnueComplexity / 468;
-    nnue -= nnue * nnueComplexity / 18000;
+    if (useAugmented) {
+        // --- Experimental Augmented NNUE Path ---
+        // This path utilizes an NNUE network with augmented features, specifically
+        // combining the standard HalfKAv2_hm features with new piece-pair features.
+        // The goal is to capture more detailed positional nuances.
+        //
+        // **IMPORTANT DISCLAIMER:**
+        // This is an EXPERIMENTAL feature. It requires a **completely new NNUE model
+        // to be trained** using the `FeatureTransformerAugmented`. The existing
+        // network files are NOT compatible. The ELO impact and viability of these
+        // new features can only be assessed after successful retraining of a network
+        // and rigorous testing (e.g., through fishtest).
+        //
+        // Note: AccumulatorCaches might need a new cache for augmented network if its dimensions differ significantly.
+        // Using &caches.big for now. A proper solution would involve adding a cache specific to 
+        // NetworkAugmented if its TransformedFeatureDimensions is different from BigNetwork's.
+        auto [psqt, positional] = networks.augmented.value().evaluate(pos, accumulators, &caches.big);
 
-    int material = 535 * pos.count<PAWN>() + pos.non_pawn_material();
-    int v        = (nnue * (77777 + material) + optimism * (7777 + material)) / 77777;
+        Value nnue = (125 * psqt + 131 * positional) / 128;
+        
+        // Blend optimism and eval with nnue complexity
+        int nnueComplexity = std::abs(psqt - positional);
+        optimism += optimism * nnueComplexity / 468;
+        nnue -= nnue * nnueComplexity / 18000;
 
-    // Damp down the evaluation linearly when shuffling
-    v -= v * pos.rule50_count() / 212;
+        int material = 535 * pos.count<PAWN>() + pos.non_pawn_material();
+        int v        = (nnue * (77777 + material) + optimism * (7777 + material)) / 77777;
 
-    // Guarantee evaluation does not hit the tablebase range
-    v = std::clamp(v, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
+        // Damp down the evaluation linearly when shuffling
+        v -= v * pos.rule50_count() / 212;
 
-    return v;
+        // Guarantee evaluation does not hit the tablebase range
+        v = std::clamp(v, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
+        return v;
+
+    } else {
+        // Existing logic for big/small networks
+        bool smallNet           = use_smallnet(pos);
+        auto [psqt, positional] = smallNet ? networks.small.evaluate(pos, accumulators, &caches.small)
+                                           : networks.big.evaluate(pos, accumulators, &caches.big);
+
+        Value nnue = (125 * psqt + 131 * positional) / 128;
+
+        // Re-evaluate the position when higher eval accuracy is worth the time spent
+        if (smallNet && (std::abs(nnue) < 236))
+        {
+            std::tie(psqt, positional) = networks.big.evaluate(pos, accumulators, &caches.big);
+            nnue                       = (125 * psqt + 131 * positional) / 128;
+            // smallNet                   = false; // Original logic implies this by re-assigning psqt/positional from big
+        }
+        
+        // Blend optimism and eval with nnue complexity
+        int nnueComplexity = std::abs(psqt - positional);
+        optimism += optimism * nnueComplexity / 468;
+        nnue -= nnue * nnueComplexity / 18000;
+
+        int material = 535 * pos.count<PAWN>() + pos.non_pawn_material();
+        int v        = (nnue * (77777 + material) + optimism * (7777 + material)) / 77777;
+
+        // Damp down the evaluation linearly when shuffling
+        v -= v * pos.rule50_count() / 212;
+
+        // Guarantee evaluation does not hit the tablebase range
+        v = std::clamp(v, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
+        return v;
+    }
 }
 
 // Like evaluate(), but instead of returning a value, it returns

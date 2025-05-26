@@ -118,17 +118,22 @@ using SmallNetworkArchitecture =
 using BigFeatureTransformer  = FeatureTransformer<TransformedFeatureDimensionsBig>;
 using BigNetworkArchitecture = NetworkArchitecture<TransformedFeatureDimensionsBig, L2Big, L3Big>;
 
+// Definition for the augmented network
+using AugmentedFeatureTransformer = Features::FeatureTransformerAugmented; // Using the class from nnue_feature_transformer_augmented.h
+using NetworkAugmented = Network<AugmentedNetworkArchitecture, AugmentedFeatureTransformer>;
+
 using NetworkBig   = Network<BigNetworkArchitecture, BigFeatureTransformer>;
 using NetworkSmall = Network<SmallNetworkArchitecture, SmallFeatureTransformer>;
 
 
 struct Networks {
-    Networks(NetworkBig&& nB, NetworkSmall&& nS) :
+    Networks(NetworkBig&& nB, NetworkSmall&& nS) : // Constructor unchanged for now
         big(std::move(nB)),
         small(std::move(nS)) {}
 
     NetworkBig   big;
     NetworkSmall small;
+    std::optional<NetworkAugmented> augmented; // Added augmented network
 };
 
 

@@ -26,6 +26,7 @@
 #include <iosfwd>
 
 #include "features/half_ka_v2_hm.h"
+#include "features/nnue_feature_transformer_augmented.h" // Added for augmented features
 #include "layers/affine_transform.h"
 #include "layers/affine_transform_sparse_input.h"
 #include "layers/clipped_relu.h"
@@ -37,6 +38,10 @@ namespace Stockfish::Eval::NNUE {
 // Input features used in evaluation function
 using FeatureSet = Features::HalfKAv2_hm;
 
+// Experimental: Feature set augmented with piece-pair features.
+// Requires a separately trained network. See FeatureTransformerAugmented disclaimer.
+using FeatureSetAugmented = Features::FeatureTransformerAugmented;
+
 // Number of input feature dimensions after conversion
 constexpr IndexType TransformedFeatureDimensionsBig = 3072;
 constexpr int       L2Big                           = 15;
@@ -45,6 +50,20 @@ constexpr int       L3Big                           = 32;
 constexpr IndexType TransformedFeatureDimensionsSmall = 128;
 constexpr int       L2Small                           = 15;
 constexpr int       L3Small                           = 32;
+
+// Dimensions for the network using augmented features
+// The TransformedFeatureDimensions must be chosen carefully. It's not directly
+// HalfKAv2_hm::Dimensions + PIECE_PAIR_FEATURE_TYPE_COUNT, as the 'TransformedFeatureDimensions'
+// is the size *after* the feature transformer's specific internal processing 
+// (which often involves some form of mapping or hashing if the raw feature space is huge).
+// For now, let's assume the 'TransformedFeatureDimensions' for the NNUE input layer
+// will be slightly larger than TransformedFeatureDimensionsBig to account for the new features.
+// A proper value would emerge during network training and architecture tuning.
+// Let's tentatively add space for the new features directly.
+// This is a placeholder and likely needs refinement.
+constexpr IndexType TransformedFeatureDimensionsAugmented = TransformedFeatureDimensionsBig + Features::PIECE_PAIR_FEATURE_TYPE_COUNT * 16; // Multiply by a factor, e.g. 16, as transformed features might be sparser or need more space than raw count.
+constexpr int       L2Augmented                           = L2Big; // Or some other value.
+constexpr int       L3Augmented                           = L3Big; // Or some other value.
 
 constexpr IndexType PSQTBuckets = 8;
 constexpr IndexType LayerStacks = 8;
@@ -137,6 +156,17 @@ struct NetworkArchitecture {
         return outputValue;
     }
 };
+
+// Typedefs for specific network architectures
+using BigNetworkArchitecture   = NetworkArchitecture<TransformedFeatureDimensionsBig, L2Big, L3Big>;
+using SmallNetworkArchitecture = NetworkArchitecture<TransformedFeatureDimensionsSmall, L2Small, L3Small>;
+
+// Experimental: Network architecture for augmented features.
+// **IMPORTANT DISCLAIMER:** This architecture is for use with `FeatureTransformerAugmented`
+// and requires a **completely new NNUE model to be trained**. Existing network files
+// are NOT compatible. ELO impact and viability must be assessed after retraining
+// and rigorous testing (e.g., fishtest).
+using AugmentedNetworkArchitecture = NetworkArchitecture<TransformedFeatureDimensionsAugmented, L2Augmented, L3Augmented>;
 
 }  // namespace Stockfish::Eval::NNUE
 
