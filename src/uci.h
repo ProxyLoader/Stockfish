@@ -36,6 +36,8 @@ class Score;
 enum Square : uint8_t;
 using Value = int;
 
+constexpr auto StartFEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
 class UCIEngine {
    public:
     UCIEngine(int argc, char** argv);
@@ -73,6 +75,9 @@ class UCIEngine {
     static void on_bestmove(std::string_view bestmove, std::string_view ponder);
 
     void init_search_update_listeners();
+
+    [[noreturn]] void terminate_on_critical_error(const std::string& fullCommand,
+                                                  const std::string& message);
 };
 
 }  // namespace Stockfish
