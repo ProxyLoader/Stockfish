@@ -52,6 +52,9 @@
 
 namespace Stockfish {
 
+static constexpr std::array<int, 16> lmrDivisor = {3307, 2930, 2874, 2818, 3215, 3225, 3224, 2782,
+                                                   2858, 2919, 3088, 3275, 3180, 2868, 3006, 3599};
+
 namespace TB = Tablebases;
 
 void syzygy_extend_pv(const OptionsMap&            options,
@@ -82,10 +85,10 @@ int correction_value(const Worker& w, const Position& pos, const Stack* const ss
     const Color us     = pos.side_to_move();
     const auto  m      = (ss - 1)->currentMove;
     const auto& shared = w.sharedHistory;
-    const int   pcv    = shared.pawn_correction_entry(pos).at(us).pawn;
-    const int   micv   = shared.minor_piece_correction_entry(pos).at(us).minor;
-    const int   wnpcv  = shared.nonpawn_correction_entry<WHITE>(pos).at(us).nonPawnWhite;
-    const int   bnpcv  = shared.nonpawn_correction_entry<BLACK>(pos).at(us).nonPawnBlack;
+    const int   pcv    = shared.pawn_correction_entry(pos)[us].pawn;
+    const int   micv   = shared.minor_piece_correction_entry(pos)[us].minor;
+    const int   wnpcv  = shared.nonpawn_correction_entry<WHITE>(pos)[us].nonPawnWhite;
+    const int   bnpcv  = shared.nonpawn_correction_entry<BLACK>(pos)[us].nonPawnBlack;
     const int   cntcv =
       m.is_ok() ? (*(ss - 2)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()]
                     + (*(ss - 4)->continuationCorrectionHistory)[pos.piece_on(m.to_sq())][m.to_sq()]
@@ -110,10 +113,10 @@ void update_correction_history(const Position& pos,
     constexpr int nonPawnWeight = 187;
     auto&         shared        = workerThread.sharedHistory;
 
-    shared.pawn_correction_entry(pos).at(us).pawn << bonus;
-    shared.minor_piece_correction_entry(pos).at(us).minor << bonus * 153 / 128;
-    shared.nonpawn_correction_entry<WHITE>(pos).at(us).nonPawnWhite << bonus * nonPawnWeight / 128;
-    shared.nonpawn_correction_entry<BLACK>(pos).at(us).nonPawnBlack << bonus * nonPawnWeight / 128;
+    shared.pawn_correction_entry(pos)[us].pawn << bonus;
+    shared.minor_piece_correction_entry(pos)[us].minor << bonus * 153 / 128;
+    shared.nonpawn_correction_entry<WHITE>(pos)[us].nonPawnWhite << bonus * nonPawnWeight / 128;
+    shared.nonpawn_correction_entry<BLACK>(pos)[us].nonPawnBlack << bonus * nonPawnWeight / 128;
 
     if (m.is_ok())
     {
@@ -232,7 +235,7 @@ void Search::Worker::start_searching() {
     Skill   skill =
       Skill(options["Skill Level"], options["UCI_LimitStrength"] ? int(options["UCI_Elo"]) : 0);
 
-    if (int(options["MultiPV"]) == 1 && !limits.depth && !skill.enabled())
+    if (!limits.depth && !skill.enabled())
         bestThread = threads.get_best_thread()->worker.get();
 
     main_manager()->bestPreviousScore        = bestThread->rootMoves[0].score;
@@ -244,7 +247,7 @@ void Search::Worker::start_searching() {
 
     // Send PV info if it has changed since last output in iterative_deepening().
     if (!uciPvSent || bestThread != this)
-        main_manager()->pv(*bestThread, threads, tt, bestThread->completedDepth);
+        main_manager()->pv(*bestThread, threads, tt, bestThread->rootDepth);
 
     // In rare cases, pv() may change the ponder move through syzygy_extend_pv().
     std::string ponder;
@@ -319,9 +322,11 @@ bool Search::Worker::iterative_deepening() {
             mainHistory[c][i] = mainHistory[c][i] * 820 / 1024;
 
     // Iterative deepening loop until requested to stop or the target depth is reached
-    while (++rootDepth < MAX_PLY && !threads.stop
-           && !(limits.depth && mainThread && rootDepth > limits.depth))
+    while (rootDepth + 1 < MAX_PLY && !threads.stop
+           && !(limits.depth && mainThread && rootDepth >= limits.depth))
     {
+        rootDepth++;
+
         // Age out PV variability metric and signal the start of a new iteration.
         if (mainThread)
         {
@@ -423,6 +428,24 @@ bool Search::Worker::iterative_deepening() {
                 assert(alpha >= -VALUE_INFINITE && beta <= VALUE_INFINITE);
             }
 
+            // In multiPV analysis we do not let aborted searches spoil mated-in/
+            // TB loss scores from a completed search in an earlier PV line.
+            // A mated-in/TB loss from an aborted search for pvIdx > 0 can only become
+            // bestmove in the sorting below, if the current bestmove (and hence also
+            // the previously searched pvIdx - 1 line) is already a proven loss.
+            if (threads.stop && pvIdx && is_loss(rootMoves[pvIdx - 1].score)
+                && rootMoves[pvIdx] < rootMoves[pvIdx - 1])
+            {
+                rootMoves[pvIdx].score = rootMoves[pvIdx].uciScore =
+                  (rootMoves[pvIdx].previousScore != -VALUE_INFINITE
+                   && rootMoves[pvIdx].previousScore < rootMoves[pvIdx - 1].score)
+                    ? rootMoves[pvIdx].previousScore
+                    : rootMoves[pvIdx - 1].score;
+                rootMoves[pvIdx].previousScore   = -VALUE_INFINITE;
+                rootMoves[pvIdx].scoreLowerbound = rootMoves[pvIdx].scoreUpperbound = false;
+                rootMoves[pvIdx].pv.resize(1);
+            }
+
             // Sort the PV lines searched so far and update the GUI
             std::stable_sort(rootMoves.begin() + pvFirst, rootMoves.begin() + pvIdx + 1);
 
@@ -449,7 +472,7 @@ bool Search::Worker::iterative_deepening() {
         // A mated-in/TB-loss score from an aborted search cannot be trusted: the loss
         // could be delayed or refuted upon exploring the remaining root-moves.
         // Thus here we roll back to the score from the previous iteration.
-        else if (rootMoves[0].score != -VALUE_INFINITE && is_loss(rootMoves[0].score))
+        else if (!pvIdx && rootMoves[0].score != -VALUE_INFINITE && is_loss(rootMoves[0].score))
         {
             // Bring the last best move to the front for best thread selection.
             if (!lastIterationPV.empty())
@@ -501,10 +524,9 @@ bool Search::Worker::iterative_deepening() {
             fallingEval = std::clamp(fallingEval, 0.581, 1.655);
 
             // If the bestMove is stable over several iterations, reduce time accordingly
-            double k      = 0.476;
-            double center = lastBestMoveDepth + 11.565;
-
-            timeReduction = 0.64 + 0.93 / (0.953 + std::exp(-k * (completedDepth - center)));
+            timeReduction = std::clamp(
+              interpolate(double(completedDepth - lastBestMoveDepth), 5.0, 18.0, 0.65, 1.55), 0.65,
+              1.55);
 
             double reduction = (1.5 + mainThread->previousTimeReduction) / (2.255 * timeReduction);
 
@@ -891,17 +913,15 @@ Value Search::Worker::search(
 
     // Step 8. Futility pruning: child node
     // The depth condition is important for mate finding.
+    if (!ss->ttPv && depth < 15 && eval >= beta && (!ttData.move || ttCapture) && !is_loss(beta)
+        && !is_win(eval))
     {
-        auto futility_margin = [&](Depth d) {
-            Value futilityMult = 76 - 21 * !ss->ttHit;
+        Value futilityMult   = 76 - 21 * !ss->ttHit;
+        Value futilityMargin = futilityMult * depth
+                             - (2686 * improving + 362 * opponentWorsening) * futilityMult / 1024
+                             + std::abs(correctionValue) / 180600;
 
-            return futilityMult * d
-                 - (2686 * improving + 362 * opponentWorsening) * futilityMult / 1024  //
-                 + std::abs(correctionValue) / 180600;
-        };
-
-        if (!ss->ttPv && depth < 15 && eval - futility_margin(depth) >= beta && eval >= beta
-            && (!ttData.move || ttCapture) && !is_loss(beta) && !is_win(eval))
+        if (eval - futilityMargin >= beta)
             return (2 * beta + eval) / 3;
     }
 
@@ -1097,6 +1117,7 @@ moves_loop:  // When in check, search starts here
             }
             else if (!ss->followPV || !PvNode)
             {
+                int dIndex  = std::min(int(depth), int(lmrDivisor.size())) - 1;
                 int history = (*contHist[0])[movedPiece][move.to_sq()]
                             + (*contHist[1])[movedPiece][move.to_sq()]
                             + sharedHistory.pawn_entry(pos)[movedPiece][move.to_sq()];
@@ -1107,8 +1128,8 @@ moves_loop:  // When in check, search starts here
 
                 history += 71 * mainHistory[us][move.raw()] / 32;
 
-                // (*Scaler): Generally, lower divisors scales well
-                lmrDepth += history / 2995;
+                // (*Scaler): Generally, lower divisors scale well
+                lmrDepth += history / lmrDivisor[dIndex];
 
                 Value futilityValue = ss->staticEval + 42 + 151 * !bestMove + 120 * lmrDepth
                                     + 86 * (ss->staticEval > alpha);
